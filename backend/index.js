@@ -5,6 +5,14 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 const { Bot, InlineKeyboard } = require("grammy");
 
+const {
+  loadAllCommunities,
+  upsertCommunity,
+  updateProposalCounter,
+  upsertVoter,
+  upsertProposal,
+} = require("./db");
+
 // ===== ENV =====
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 8080;
@@ -20,68 +28,22 @@ if (!BOT_TOKEN) {
 const bot = new Bot(BOT_TOKEN);
 
 /**
-IN-MEMORY STATE (temporário, depois vamos trocar pra Postgres)
+IN-MEMORY CACHE (agora é cache, mas será persistido em Postgres também)
 
 communities[groupId] = {
-  title: string,
-  adminId: number,
-  voters: {
-    [userId]: {
-      approved: boolean,
-      weight: number | null,
-      processed: boolean, // already approved/rejected?
-      username: string,
-      walletAddress: string | null,
-      lastChangeReason: string | null,
-      lastModifiedAt: string | null,
-    }
-  },
-  proposals: [{
-    id: number,
-    title: string,
-    options: string[],
-    votes: { [optionIdx]: totalWeight },
-    voterMap: { [userId]: optionIdx },
-    status: "open" | "closed",
-    quorumWeight: number | null,
-    endsAt: number | null,  // timestamp ms
-    createdBy: number,
-    attachmentFileId: string | null,
-    attachmentFileName: string | null,
-  }],
-  proposalCounter: number,
+  title,
+  adminId,
+  voters: { userId: {approved, weight, ...} },
+  proposals: [ { ... } ],
+  proposalCounter
 }
 
-adminsCommunities[adminId] = Map<groupId, { title: string }>
+adminsCommunities[adminId] = Map<groupId, { title }>
+*/
+let communities = {};
+let adminsCommunities = {};
 
-pendingCustomWeight[adminId] = {
-  groupId,
-  targetUserId
-}
-
-draftProposal[adminId] = {
-  step: "TITLE" | "OPTIONS" | "QUORUM" | "DURATION" | "ATTACHMENT" | "CHOOSE_COMMUNITY",
-  title: string,
-  options: string[],
-  quorumWeight: number | null,
-  endsAt: number | null,
-  attachmentFileId: string | null,
-  attachmentFileName: string | null,
-}
-
-waitingMyVoteSelection[userId] = true
-  // tracks if user opened /myvote and is choosing which proposal
-
-pendingSetWeight[adminId] = {
-  step: "CHOOSE_COMMUNITY" | "CHOOSE_USER" | "ASK_WEIGHT" | "ASK_REASON",
-  groupId: number | null,
-  targetUserId: number | null,
-  newWeight: number | null,
-}
-**/
-
-const communities = {};
-const adminsCommunities = {};
+// estes fluxos podem morrer se reiniciar, tudo bem
 const pendingCustomWeight = {};
 const draftProposal = {};
 const waitingMyVoteSelection = {};
@@ -136,7 +98,7 @@ function getOrInitVoterRecord(comm, fromUser) {
     comm.voters[uid] = {
       approved: false,
       weight: null,
-      processed: false, // admin hasn't decided yet
+      processed: false,
       username: fromUser.username
         ? `@${fromUser.username}`
         : (fromUser.first_name || "Unknown"),
@@ -145,7 +107,6 @@ function getOrInitVoterRecord(comm, fromUser) {
       lastModifiedAt: null,
     };
   } else {
-    // refresh display name
     comm.voters[uid].username = fromUser.username
       ? `@${fromUser.username}`
       : (fromUser.first_name || comm.voters[uid].username);
@@ -224,8 +185,8 @@ function calcWinnerInfo(proposal) {
   }
 
   return {
-    outcomeType,        // "winner" | "tie" | "no_votes"
-    winnerIdx,          // index if single winner
+    outcomeType,
+    winnerIdx,
     winnerPct,
     total,
     breakdown,
@@ -314,6 +275,9 @@ async function autoCloseExpiredProposals(groupId) {
 
 async function finalizeProposal(comm, groupId, proposal) {
   proposal.status = "closed";
+
+  // [DB] persist proposal close
+  await upsertProposal(groupId, proposal);
 
   const finalMsg = formatResultsSummaryForGroup(proposal);
 
@@ -418,13 +382,19 @@ bot.command("start", async (ctx) => {
       justAssignedAdmin = true;
     }
 
+    // [DB] persist comunidade
+    await upsertCommunity(chatId, comm.title, comm.adminId);
+
     linkAdminToCommunity(
       comm.adminId,
       chatId,
       comm.title
     );
 
-    getOrInitVoterRecord(comm, ctx.from);
+    const voter = getOrInitVoterRecord(comm, ctx.from);
+
+    // [DB] persist admin como voter também
+    await upsertVoter(chatId, ctx.from.id, voter);
 
     await ctx.reply(
       "👋 Balloteer is now active in this community.\n\n" +
@@ -527,13 +497,11 @@ bot.command("join", async (ctx) => {
 
     // init voter record (processed=false so admin still needs to decide)
     const voter = getOrInitVoterRecord(comm, ctx.from);
-    voter.approved = voter.approved || false;
-    if (voter.weight === undefined) voter.weight = null;
-    if (voter.processed === undefined) voter.processed = false;
-    if (voter.lastChangeReason === undefined) voter.lastChangeReason = null;
-    if (voter.lastModifiedAt === undefined) voter.lastModifiedAt = null;
 
-    // if admin already processed them once, don't spam
+    // [DB] persist estado atual do pedido
+    await upsertVoter(gid, userId, voter);
+
+    // se admin já marcou processed=true antes, não spam
     if (voter.processed === true) {
       continue;
     }
@@ -615,7 +583,6 @@ bot.callbackQuery(/approve_(-?\d+)_(-?\d+)_(\d+)/, async (ctx) => {
     return;
   }
 
-  // block if already processed
   if (voter.processed === true) {
     await popup(ctx, "Already processed. Use /setweight to change later.");
     return;
@@ -627,6 +594,9 @@ bot.callbackQuery(/approve_(-?\d+)_(-?\d+)_(\d+)/, async (ctx) => {
   voter.walletAddress = voter.walletAddress || null;
   voter.lastChangeReason = "initial approval";
   voter.lastModifiedAt = new Date().toISOString();
+
+  // [DB] persist aprovação
+  await upsertVoter(groupId, targetUserId, voter);
 
   await ctx.answerCallbackQuery({
     text: `Approved (${weight} weight)`,
@@ -726,6 +696,9 @@ bot.callbackQuery(/reject_(-?\d+)_(-?\d+)/, async (ctx) => {
   voter.processed = true;
   voter.lastChangeReason = "rejected by admin";
   voter.lastModifiedAt = new Date().toISOString();
+
+  // [DB] persist rejeição
+  await upsertVoter(groupId, targetUserId, voter);
 
   await ctx.answerCallbackQuery({
     text: "Rejected",
@@ -891,7 +864,6 @@ bot.command("myvote", async (ctx) => {
     return;
   }
 
-  // otherwise show list of active proposals they can vote in
   const kb = buildMyVoteKeyboardForUser(ctx.from.id);
   if (!kb) {
     await ctx.reply(
@@ -1030,7 +1002,7 @@ bot.callbackQuery(/dmvote_(-?\d+)_(-?\d+)_(\d+)/, async (ctx) => {
     return;
   }
 
-  // remove previous vote weight if they are changing vote
+  // remove previous vote weight if changing vote
   if (proposal.voterMap[userId] !== undefined) {
     const oldIdx = proposal.voterMap[userId];
     proposal.votes[oldIdx] =
@@ -1042,6 +1014,9 @@ bot.callbackQuery(/dmvote_(-?\d+)_(-?\d+)_(\d+)/, async (ctx) => {
   proposal.voterMap[userId] = optionIdx;
   proposal.votes[optionIdx] =
     (proposal.votes[optionIdx] || 0) + voter.weight;
+
+  // [DB] salvar proposta atualizada (inclui votos e voterMap)
+  await upsertProposal(groupId, proposal);
 
   await ctx.answerCallbackQuery({
     text: "✅ Vote counted",
@@ -1259,7 +1234,7 @@ bot.callbackQuery(/sw_user_(-?\d+)/, async (ctx) => {
   );
 });
 
-// on("message"): handle 3 interactive flows
+// on("message"): handle 3 interactive flows (/setweight, approval custom, /new)
 bot.on("message", async (ctx) => {
   const isDoc = !!ctx.message?.document;
   const isText = typeof ctx.message?.text === "string";
@@ -1321,6 +1296,9 @@ bot.on("message", async (ctx) => {
       voter.lastChangeReason = reasonText;
       voter.lastModifiedAt = new Date().toISOString();
 
+      // [DB] persist ajuste de peso
+      await upsertVoter(groupId, targetUserId, voter);
+
       delete pendingSetWeight[fromId];
 
       await ctx.reply(
@@ -1366,6 +1344,9 @@ bot.on("message", async (ctx) => {
           voter.walletAddress = voter.walletAddress || null;
           voter.lastChangeReason = "initial approval (custom weight)";
           voter.lastModifiedAt = new Date().toISOString();
+
+          // [DB] persist aprovação custom
+          await upsertVoter(groupId, targetUserId, voter);
 
           await ctx.reply(
             `✅ Approved ${voter.username} (ID ${targetUserId}) in "${comm.title}" with custom weight ${wNum}.`
@@ -1557,8 +1538,8 @@ bot.callbackQuery(/publish_(-?\d+)/, async (ctx) => {
     id: comm.proposalCounter++,
     title: draft.title,
     options: draft.options,
-    votes: {},
-    voterMap: {},
+    votes: {},        // { "0": totalWeight }
+    voterMap: {},     // { "userId": optionIdx }
     status: "open",
     quorumWeight: draft.quorumWeight,
     endsAt: draft.endsAt,
@@ -1568,6 +1549,14 @@ bot.callbackQuery(/publish_(-?\d+)/, async (ctx) => {
   };
 
   comm.proposals.push(newProposal);
+
+  // [DB] salvar counter atualizado
+  await updateProposalCounter(groupId, comm.proposalCounter);
+
+  // [DB] salvar proposta recém criada
+  await upsertProposal(groupId, newProposal);
+
+  // limpamos o draft em memória
   delete draftProposal[adminId];
 
   await ctx.answerCallbackQuery({ text: "Published!" });
@@ -1682,14 +1671,16 @@ app.get("/", (req, res) => {
   // init bot info (important for webhook mode because we reference bot.botInfo.username)
   await bot.init();
 
+  // [DB] carregar tudo do banco -> memória
+  const loaded = await loadAllCommunities();
+  communities = loaded.communities;
+  adminsCommunities = loaded.adminsCommunities;
+
   const server = app.listen(PORT, async () => {
     console.log(`🚀 API listening on port ${PORT}`);
 
     try {
-      // clear old webhook & drop_pending_updates so we don't get backlog from polling mode
       await bot.api.deleteWebhook({ drop_pending_updates: true });
-
-      // register our webhook URL with Telegram
       await bot.api.setWebhook(`${PUBLIC_URL}/telegram/webhook`);
 
       console.log("📡 Webhook registered at", `${PUBLIC_URL}/telegram/webhook`);
@@ -1702,13 +1693,13 @@ app.get("/", (req, res) => {
           "- tie/no-vote handling in results\n" +
           "- per-voter weights with justification\n" +
           "- blocked repeat approvals\n" +
-          "- DM notifications to users when weight changes"
+          "- DM notifications to users when weight changes\n" +
+          "- 💾 Postgres persistence"
       );
     } catch (err) {
       console.error("❌ Failed to set webhook:", err);
     }
   });
 
-  // IMPORTANT: DO NOT call bot.start() here.
-  // bot.start() is only for long polling, not for webhook mode.
+  // IMPORTANT: DO NOT call bot.start() here. webhook mode only.
 })();
