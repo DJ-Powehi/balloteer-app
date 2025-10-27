@@ -3,15 +3,15 @@
     "version": "1.0.0",
     "private": true,
     "scripts": {
-      "start": "node backend/index.js",
-      "dev": "node backend/index.js"
+        "start": "node backend/index.js",
+        "dev": "node backend/index.js"
     },
     "dependencies": {
-      "express": "^4.19.2",
-      "cors": "^2.8.5",
-      "body-parser": "^1.20.3",
-      "dotenv": "^17.2.3",
-      "grammy": "^1.38.3"
+        "body-parser": "^1.20.3",
+        "cors": "^2.8.5",
+        "dotenv": "^17.2.3",
+        "express": "^4.19.2",
+        "grammy": "^1.38.3",
+        "pg": "^8.16.3"
     }
-  }
-  
+}
