@@ -987,34 +987,61 @@ bot.callbackQuery(/^showres_(.+)$/, async (ctx) => {
 // === SERVER STARTUP (WEBHOOK MODE)       ===
 // ===========================================
 
-// 1) endpoint que o Telegram chama
-app.post("/telegram/webhook", (req, res) => {
-  bot.handleUpdate(req.body);
-  res.sendStatus(200);
+const express = require("express");
+const bodyParser = require("body-parser");
+const cors = require("cors");
+
+// garante que app existe
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+// pega env
+const TELEGRAM_BOT_TOKEN = process.env.BOT_TOKEN;
+const PUBLIC_URL =
+  process.env.PUBLIC_URL || "https://balloteer-app-production.up.railway.app";
+const PORT = process.env.PORT || 8080;
+
+// Rota que o Telegram vai chamar com os updates
+app.post("/telegram/webhook", async (req, res) => {
+  try {
+    await bot.handleUpdate(req.body);
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("❌ Error in webhook handler:", err);
+    res.sendStatus(500);
+  }
 });
 
-// 2) healthcheck
+// Healthcheck / debug
 app.get("/", (req, res) => {
   res.status(200).send("Balloteer bot is running ✅");
 });
 
-// 3) sobe servidor e registra webhook
-app.listen(PORT, async () => {
-  console.log(`🚀 API listening on port ${PORT}`);
+(async () => {
+  // 1. inicializa info do bot (importante p/ webhook mode)
+  await bot.init();
 
-  try {
-    // limpa webhook anterior + drop updates antigos
-    await bot.api.deleteWebhook({ drop_pending_updates: true });
+  // 2. sobe servidor HTTP
+  const server = app.listen(PORT, async () => {
+    console.log(`🚀 API listening on port ${PORT}`);
 
-    // registra novo webhook
-    await bot.api.setWebhook(`${PUBLIC_URL}/telegram/webhook`);
+    try {
+      // limpa qualquer webhook antigo e pendências
+      await bot.api.deleteWebhook({ drop_pending_updates: true });
 
-    console.log("📡 Webhook registered at", `${PUBLIC_URL}/telegram/webhook`);
-  } catch (err) {
-    console.error("❌ Failed to set webhook:", err);
-  }
-});
+      // registra o webhook ATUAL
+      await bot.api.setWebhook(`${PUBLIC_URL}/telegram/webhook`);
 
-// IMPORTANTE: NÃO chamar bot.start() aqui.
-// bot.start() = long polling local.
-// Railway usa webhook.
+      console.log(
+        "📡 Webhook registered at",
+        `${PUBLIC_URL}/telegram/webhook`
+      );
+    } catch (err) {
+      console.error("❌ Failed to set webhook:", err);
+    }
+  });
+
+  // IMPORTANTE: NÃO chamar bot.start() aqui.
+  // bot.start() = long polling. Webhook já cuida dos updates.
+})();
