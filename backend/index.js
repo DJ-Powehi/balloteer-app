@@ -994,17 +994,15 @@ app.get("/", (req, res) => {
 });
 
 // telegram webhook endpoint
-app.post(`/telegram-webhook/${WEBHOOK_SECRET_TOKEN}`, async (req, res) => {
-  try {
-    await bot.handleUpdate(req.body);
-  } catch (err) {
-    console.error("bot.handleUpdate error:", err);
-  }
-  // always respond quickly so Telegram is happy
-  res.status(200).send("ok");
+// registra webhook no Telegram assim que sobe:
+await bot.api.setWebhook(`${PUBLIC_URL}/telegram/webhook`);
+
+app.post("/telegram/webhook", (req, res) => {
+  bot.handleUpdate(req.body);
+  res.sendStatus(200);
 });
 
-// start server
+// sobe o servidor HTTP
 app.listen(PORT, () => {
-  console.log("🚀 API listening on port " + PORT);
+  console.log(`🚀 API listening on port ${PORT}`);
 });
