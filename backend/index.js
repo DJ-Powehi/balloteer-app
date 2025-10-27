@@ -3,18 +3,23 @@ require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
 const cors = require("cors");
-
 const { Bot, InlineKeyboard } = require("grammy");
 
 // ====== ENV VARS ======
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 8080;
 const WEBHOOK_SECRET_TOKEN = BOT_TOKEN; // usamos o token do bot na URL pra segurança básica
+const PUBLIC_URL = process.env.PUBLIC_URL || "https://placeholder.local";
 
 if (!BOT_TOKEN) {
-  console.error("❌ BOT_TOKEN is missing in .env");
+  console.error("❌ BOT_TOKEN is missing in .env / Railway Variables");
   process.exit(1);
 }
+
+// ====== EXPRESS APP (webhook server) ======
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
 
 // ====== IN-MEMORY STATE ======
 // IMPORTANTE: isso zera quando reinicia o container. Depois vamos trocar pra Postgres.
@@ -248,10 +253,9 @@ bot.command("join", async (ctx) => {
     keyboard.text(g.title || gid, `reqjoin_${gid}`).row();
   }
 
-  await ctx.reply(
-    "Which community do you want to join?",
-    { reply_markup: keyboard }
-  );
+  await ctx.reply("Which community do you want to join?", {
+    reply_markup: keyboard,
+  });
 });
 
 // when user taps a community in /join flow
@@ -695,10 +699,9 @@ bot.on("message:text", async (ctx, next) => {
 
         uState.step = "await_group_choice";
 
-        await ctx.reply(
-          "Which community should get this vote?",
-          { reply_markup: kb }
-        );
+        await ctx.reply("Which community should get this vote?", {
+          reply_markup: kb,
+        });
         return;
       }
     }
@@ -791,16 +794,13 @@ bot.callbackQuery(/^publishgroup_(.+)$/, async (ctx) => {
         voteKb.text(opt, `cast_${newId}_${idx}`).row();
       });
 
-      // DON'T leak their weight or choices publicly,
-      // we just show them the ballot.
+      // we only show the ballot privately
       try {
         await bot.api.sendMessage(
           uid,
           `🗳 New vote in "${g.title}"!\n\n` +
             `#${newId}: ${draft.title}\n` +
-            (draft.description
-              ? `\n${draft.description}\n`
-              : "") +
+            (draft.description ? `\n${draft.description}\n` : "") +
             `\nTap your choice:`,
           { reply_markup: voteKb }
         );
@@ -983,26 +983,38 @@ bot.callbackQuery(/^showres_(.+)$/, async (ctx) => {
   await ctx.reply(summary);
 });
 
-// ====== EXPRESS WEB SERVER + WEBHOOK ======
-const app = express();
-app.use(cors());
-app.use(bodyParser.json());
+// ===========================================
+// === SERVER STARTUP (WEBHOOK MODE)       ===
+// ===========================================
 
-// healthcheck
-app.get("/", (req, res) => {
-  res.status(200).send("Balloteer backend up.");
-});
-
-// telegram webhook endpoint
-// registra webhook no Telegram assim que sobe:
-await bot.api.setWebhook(`${PUBLIC_URL}/telegram/webhook`);
-
+// 1) endpoint que o Telegram chama
 app.post("/telegram/webhook", (req, res) => {
   bot.handleUpdate(req.body);
   res.sendStatus(200);
 });
 
-// sobe o servidor HTTP
-app.listen(PORT, () => {
-  console.log(`🚀 API listening on port ${PORT}`);
+// 2) healthcheck
+app.get("/", (req, res) => {
+  res.status(200).send("Balloteer bot is running ✅");
 });
+
+// 3) sobe servidor e registra webhook
+app.listen(PORT, async () => {
+  console.log(`🚀 API listening on port ${PORT}`);
+
+  try {
+    // limpa webhook anterior + drop updates antigos
+    await bot.api.deleteWebhook({ drop_pending_updates: true });
+
+    // registra novo webhook
+    await bot.api.setWebhook(`${PUBLIC_URL}/telegram/webhook`);
+
+    console.log("📡 Webhook registered at", `${PUBLIC_URL}/telegram/webhook`);
+  } catch (err) {
+    console.error("❌ Failed to set webhook:", err);
+  }
+});
+
+// IMPORTANTE: NÃO chamar bot.start() aqui.
+// bot.start() = long polling local.
+// Railway usa webhook.
