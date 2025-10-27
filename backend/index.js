@@ -8,18 +8,14 @@ const { Bot, InlineKeyboard } = require("grammy");
 // ====== ENV VARS ======
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 8080;
-const WEBHOOK_SECRET_TOKEN = BOT_TOKEN; // usamos o token do bot na URL pra segurança básica
-const PUBLIC_URL = process.env.PUBLIC_URL || "https://placeholder.local";
+const PUBLIC_URL =
+  process.env.PUBLIC_URL ||
+  "https://balloteer-app-production.up.railway.app";
 
 if (!BOT_TOKEN) {
-  console.error("❌ BOT_TOKEN is missing in .env / Railway Variables");
+  console.error("❌ BOT_TOKEN is missing in .env / Railway variables");
   process.exit(1);
 }
-
-// ====== EXPRESS APP (webhook server) ======
-const app = express();
-app.use(cors());
-app.use(bodyParser.json());
 
 // ====== IN-MEMORY STATE ======
 // IMPORTANTE: isso zera quando reinicia o container. Depois vamos trocar pra Postgres.
@@ -29,7 +25,7 @@ const state = {
   nextProposalId: 1,
   pendingJoinRequests: {}, // groupId -> [ { userId, name } ]
   pendingWeightChange: {}, // adminId -> { step, groupId, targetUserId, newWeight, reason }
-  userPrivateState: {}, // userId -> { step: "...", draftProposal: {...}, lastProposalIdPrompted?: number }
+  userPrivateState: {}, // userId -> { step: "...", draftProposal: {...} }
 };
 
 // ====== CREATE BOT (webhook mode) ======
@@ -48,7 +44,6 @@ function buildResultsSummary(proposal) {
     0
   );
 
-  // build breakdown
   let breakdownLines = [];
   let topWeight = 0;
   let winners = [];
@@ -70,15 +65,13 @@ function buildResultsSummary(proposal) {
   } else if (winners.length > 1) {
     statusLine = `It's a tie between: ${winners.join(" vs ")}`;
   } else {
+    const winOpt = winners[0];
+    const winIdx = proposal.options.indexOf(winOpt);
     const winPct =
       totalWeight === 0
         ? 0
-        : Math.round(
-            (proposal.tally[proposal.options.indexOf(winners[0])] /
-              totalWeight) *
-              100
-          );
-    statusLine = `${winners[0]} won with ${winPct}% of the voting power.`;
+        : Math.round((proposal.tally[winIdx] / totalWeight) * 100);
+    statusLine = `${winOpt} won with ${winPct}% of the voting power.`;
   }
 
   return (
@@ -99,8 +92,9 @@ function isProposalOpen(p) {
 
 // helper: did quorum hit?
 function quorumReached(p, group) {
-  // quorum: at least 2 distinct approved voters voted, or >= 50% of total weight
-  // you can tune this
+  // regra exemplo:
+  // - 2 pessoas distintas votaram, OU
+  // - pelo menos 50% do peso total elegível votou
   const votersWhoVoted = new Set(Object.keys(p.votes));
   if (votersWhoVoted.size >= 2) return true;
 
@@ -157,33 +151,32 @@ function isAdminOfGroup(userId, groupId) {
   return g.adminId === userId;
 }
 
-// ====== BOT LOGIC ======
+// ====== BOT COMMANDS ======
 
 // /start in private DM OR group
 bot.command("start", async (ctx) => {
   const chat = ctx.chat;
   const user = ctx.from;
 
-  // if private chat
   if (chat.type === "private") {
     await ctx.reply(
       "👋 Welcome to Balloteer.\n\n" +
-        "• To request access to vote in a community, send /join in that community first.\n" +
-        "• Admins will approve you and assign you voting weight.\n\n" +
+        "• To request access to vote in a community, send /join here and pick the community.\n" +
+        "• Admins will approve you and assign a voting weight.\n\n" +
         "Admins can run:\n" +
         "• /new – create a new vote\n" +
-        "• /close – close a vote\n" +
-        "• /setweight – change someone's voting weight"
+        "• /close – close a vote early\n" +
+        "• /setweight – change someone's voting weight\n" +
+        "• /approve – review join requests"
     );
     return;
   }
 
-  // group chat
-  // register group if first time
+  // group chat case
   if (!state.groups[chat.id]) {
     state.groups[chat.id] = {
       title: chat.title || chat.username || `group ${chat.id}`,
-      adminId: user.id, // first /start user is admin for now
+      adminId: user.id, // first /start user becomes admin
       proposals: [],
       members: {}, // userId -> { approved: bool, weight: number }
     };
@@ -191,13 +184,12 @@ bot.command("start", async (ctx) => {
 
   const g = state.groups[chat.id];
 
-  // message for everyone in group
-  let groupMsg =
+  const groupMsg =
     "👋 Balloteer is now active in this community.\n\n" +
     "How it works:\n" +
-    "• To request voting access: DM me (@Balloteer_bot) and send /join\n" +
+    "• To request voting access: DM me and send /join\n" +
     "• You can only vote after the admin approves you\n" +
-    "• Voting happens via private DM so the group stays clean\n";
+    "• Voting happens in private DM so the group stays clean\n";
 
   try {
     await ctx.reply(groupMsg);
@@ -205,7 +197,7 @@ bot.command("start", async (ctx) => {
     console.error("Failed to send group /start msg:", err.message);
   }
 
-  // DM a private “hey you're admin” ONLY to the admin (the person who ran /start first time)
+  // tell that user privately they are admin
   if (g.adminId === user.id) {
     try {
       await bot.api.sendMessage(
@@ -217,7 +209,8 @@ bot.command("start", async (ctx) => {
           "• /new to create a vote\n" +
           "• /close to end a vote\n" +
           "• /setweight to edit weights\n" +
-          "We'll ask you everything via DM so the group stays quiet."
+          "• /approve to handle join requests\n" +
+          "All flows happen here in DM."
       );
     } catch (err) {
       console.error("Couldn't DM admin:", err.message);
@@ -225,21 +218,16 @@ bot.command("start", async (ctx) => {
   }
 });
 
-// /join MUST be in DM (user asking access)
+// /join MUST be in DM
 bot.command("join", async (ctx) => {
   const chat = ctx.chat;
   const user = ctx.from;
   if (chat.type !== "private") {
-    // tell them to DM
-    await ctx.reply(
-      "📩 To request to vote, please DM me first and run /join there."
-    );
+    await ctx.reply("📩 DM me and run /join there.");
     return;
   }
 
-  // in DM we can't know which group they want.
-  // we ask them which community they want to join.
-  // Build a list of groups we know about:
+  // Build list of communities
   const groupEntries = Object.entries(state.groups);
   if (groupEntries.length === 0) {
     await ctx.reply(
@@ -258,7 +246,7 @@ bot.command("join", async (ctx) => {
   });
 });
 
-// when user taps a community in /join flow
+// handle join request selection
 bot.callbackQuery(/^reqjoin_(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
 
@@ -275,7 +263,6 @@ bot.callbackQuery(/^reqjoin_(.+)$/, async (ctx) => {
     state.pendingJoinRequests[groupId] = [];
   }
 
-  // block duplicate pending requests
   const alreadyPending = state.pendingJoinRequests[groupId].some(
     (r) => r.userId === user.id
   );
@@ -284,7 +271,7 @@ bot.callbackQuery(/^reqjoin_(.+)$/, async (ctx) => {
 
   if (alreadyApproved) {
     await ctx.reply(
-      `You're already approved in "${g.title}". You can vote in future proposals.`
+      `You're already approved in "${g.title}". You'll get future ballots in DM.`
     );
     return;
   }
@@ -296,15 +283,17 @@ bot.callbackQuery(/^reqjoin_(.+)$/, async (ctx) => {
     });
   }
 
-  // tell the user we sent request
   await ctx.reply(
     `⏳ Request sent to the admin of "${g.title}". We'll DM you when you're approved.`
   );
 
-  // ping admin ONCE per request
+  // ping admin with summary
   try {
     const reqList = state.pendingJoinRequests[groupId]
-      .map((r) => `• ${r.name} (@${user.username || "no username"})`)
+      .map(
+        (r) =>
+          `• ${r.name} (@${user.username || "no username"}) [${r.userId}]`
+      )
       .join("\n");
 
     await bot.api.sendMessage(
@@ -317,15 +306,12 @@ bot.callbackQuery(/^reqjoin_(.+)$/, async (ctx) => {
   }
 });
 
-// /approve (admin, in DM) -> choose group -> choose user -> assign weight -> accept/deny
+// /approve (admin, DM)
 bot.command("approve", async (ctx) => {
   const chat = ctx.chat;
   const admin = ctx.from;
-  if (chat.type !== "private") {
-    return; // ignore in groups
-  }
+  if (chat.type !== "private") return;
 
-  // find groups this user admins
   const adminGroups = Object.entries(state.groups).filter(
     ([gid, g]) => g.adminId === admin.id
   );
@@ -334,7 +320,6 @@ bot.command("approve", async (ctx) => {
     return;
   }
 
-  // ask which group to review
   const kb = new InlineKeyboard();
   for (const [gid, g] of adminGroups) {
     const pending = state.pendingJoinRequests[gid]
@@ -365,7 +350,6 @@ bot.callbackQuery(/^pickgroup_(.+)$/, async (ctx) => {
     return;
   }
 
-  // show each pending user w/ Approve / Deny
   for (const req of pend) {
     const kb = new InlineKeyboard()
       .text("✅ Approve", `approveuser_${groupId}_${req.userId}`)
@@ -375,7 +359,7 @@ bot.callbackQuery(/^pickgroup_(.+)$/, async (ctx) => {
       `Request:\n` +
         `Name: ${req.name}\n` +
         `Telegram ID: ${req.userId}\n\n` +
-        `Assign weight after approval using /setweight.`,
+        `Default weight will be 1. You can change via /setweight.\n`,
       { reply_markup: kb }
     );
   }
@@ -394,28 +378,26 @@ bot.callbackQuery(/^approveuser_(.+)_(.+)$/, async (ctx) => {
     return;
   }
 
-  // remove from pending list, mark approved if not already
+  // remove from pending
   const list = state.pendingJoinRequests[groupId] || [];
   const idx = list.findIndex((r) => String(r.userId) === String(targetId));
   if (idx >= 0) {
     list.splice(idx, 1);
   }
+
   if (!g.members[targetId]) {
     g.members[targetId] = { approved: true, weight: 1 };
   } else {
-    // don't let them re-approve endlessly: if already approved do nothing
     if (!g.members[targetId].approved) {
       g.members[targetId].approved = true;
       if (!g.members[targetId].weight) g.members[targetId].weight = 1;
     }
   }
 
-  // DM admin confirmation
   await ctx.reply(
     `✅ Approved user ${targetId} in "${g.title}".\nDefault weight = 1.\nUse /setweight to change.`
   );
 
-  // DM the user who got approved
   try {
     await bot.api.sendMessage(
       targetId,
@@ -464,7 +446,6 @@ bot.command("setweight", async (ctx) => {
   const admin = ctx.from;
   if (chat.type !== "private") return;
 
-  // find admin groups
   const adminGroups = Object.entries(state.groups).filter(
     ([gid, g]) => g.adminId === admin.id
   );
@@ -473,7 +454,6 @@ bot.command("setweight", async (ctx) => {
     return;
   }
 
-  // step 1: which community?
   state.pendingWeightChange[admin.id] = {
     step: "pick_group",
     groupId: null,
@@ -492,7 +472,6 @@ bot.command("setweight", async (ctx) => {
   });
 });
 
-// admin picks group
 bot.callbackQuery(/^wgroup_(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const admin = ctx.from;
@@ -512,7 +491,6 @@ bot.callbackQuery(/^wgroup_(.+)$/, async (ctx) => {
   flow.groupId = groupId;
   flow.step = "pick_user";
 
-  // list approved members
   const kb = new InlineKeyboard();
   for (const uid in g.members) {
     if (g.members[uid].approved) {
@@ -526,7 +504,6 @@ bot.callbackQuery(/^wgroup_(.+)$/, async (ctx) => {
   );
 });
 
-// admin picks user
 bot.callbackQuery(/^wuser_(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const admin = ctx.from;
@@ -554,17 +531,16 @@ bot.callbackQuery(/^wuser_(.+)$/, async (ctx) => {
   );
 });
 
-// admin replies with new weight or reason in DM
+// admin DM message handling for weight flow + proposal creation flow
 bot.on("message:text", async (ctx, next) => {
   const chat = ctx.chat;
   const from = ctx.from;
+  const text = ctx.message.text.trim();
 
-  // weight flow?
+  // handle weight change flow
   if (chat.type === "private" && state.pendingWeightChange[from.id]) {
     const flow = state.pendingWeightChange[from.id];
-    const text = ctx.message.text.trim();
 
-    // step: set_weight
     if (flow.step === "set_weight") {
       const wNum = parseInt(text, 10);
       if (isNaN(wNum) || wNum <= 0) {
@@ -580,12 +556,10 @@ bot.on("message:text", async (ctx, next) => {
       return;
     }
 
-    // step: set_reason
     if (flow.step === "set_reason") {
       flow.reason = text.toLowerCase() === "skip" ? "(no reason given)" : text;
       flow.step = "done";
 
-      // apply weight
       const g = state.groups[flow.groupId];
       if (!g || g.adminId !== from.id) {
         await ctx.reply("That community no longer exists or you're not admin.");
@@ -604,7 +578,6 @@ bot.on("message:text", async (ctx, next) => {
         `✅ Updated weight for user ${flow.targetUserId} in "${g.title}" to ${flow.newWeight}.\nReason: ${flow.reason}`
       );
 
-      // DM the affected user
       try {
         await bot.api.sendMessage(
           flow.targetUserId,
@@ -619,16 +592,14 @@ bot.on("message:text", async (ctx, next) => {
     }
   }
 
-  // proposal creation flow (/new)
+  // handle proposal creation flow (/new)
   if (chat.type === "private") {
     const uState = state.userPrivateState[from.id];
     if (uState && uState.step) {
-      const msg = ctx.message.text.trim();
-
-      // asking title
+      // awaiting title
       if (uState.step === "await_title") {
         uState.draftProposal = {
-          title: msg,
+          title: text,
           description: "",
           options: [],
           groupId: null,
@@ -641,10 +612,10 @@ bot.on("message:text", async (ctx, next) => {
         return;
       }
 
-      // asking description
+      // awaiting description
       if (uState.step === "await_description") {
-        if (msg.toLowerCase() !== "skip") {
-          uState.draftProposal.description = msg;
+        if (text.toLowerCase() !== "skip") {
+          uState.draftProposal.description = text;
         }
         uState.step = "await_options";
         await ctx.reply(
@@ -653,9 +624,9 @@ bot.on("message:text", async (ctx, next) => {
         return;
       }
 
-      // asking options
+      // awaiting options
       if (uState.step === "await_options") {
-        const opts = msg
+        const opts = text
           .split(",")
           .map((s) => s.trim())
           .filter((s) => s.length > 0);
@@ -671,16 +642,16 @@ bot.on("message:text", async (ctx, next) => {
         return;
       }
 
-      // asking duration
+      // awaiting duration
       if (uState.step === "await_duration") {
-        const m = parseInt(msg, 10);
+        const m = parseInt(text, 10);
         if (isNaN(m) || m <= 0) {
           await ctx.reply("Please send a positive number of minutes.");
           return;
         }
         uState.draftProposal.durationMins = m;
 
-        // ask which group to run this vote in
+        // ask group
         const adminGroups = Object.entries(state.groups).filter(
           ([gid, g]) => g.adminId === from.id
         );
@@ -707,17 +678,15 @@ bot.on("message:text", async (ctx, next) => {
     }
   }
 
-  // fallthrough
   await next();
 });
 
-// admin runs /new in DM to start new vote
+// /new (admin DM)
 bot.command("new", async (ctx) => {
   const chat = ctx.chat;
   const user = ctx.from;
   if (chat.type !== "private") return;
 
-  // check admin of at least one group
   const adminGroups = Object.entries(state.groups).filter(
     ([gid, g]) => g.adminId === user.id
   );
@@ -755,7 +724,7 @@ bot.callbackQuery(/^publishgroup_(.+)$/, async (ctx) => {
     return;
   }
 
-  // finalise proposal
+  // finalize proposal
   const newId = state.nextProposalId++;
   const draft = uState.draftProposal;
 
@@ -778,14 +747,13 @@ bot.callbackQuery(/^publishgroup_(.+)$/, async (ctx) => {
 
   g.proposals.push(newId);
 
-  // DM confirm admin
   await ctx.reply(
     `✅ Proposal #${newId} created for "${g.title}".\n` +
       `Voting will last ${draft.durationMins} min.\n` +
       "I'm now DM'ing approved voters with the ballot."
   );
 
-  // DM each approved + weighted voter with voting buttons
+  // DM each approved voter with buttons
   for (const uid in g.members) {
     const member = g.members[uid];
     if (member.approved && member.weight > 0) {
@@ -794,7 +762,6 @@ bot.callbackQuery(/^publishgroup_(.+)$/, async (ctx) => {
         voteKb.text(opt, `cast_${newId}_${idx}`).row();
       });
 
-      // we only show the ballot privately
       try {
         await bot.api.sendMessage(
           uid,
@@ -810,10 +777,9 @@ bot.callbackQuery(/^publishgroup_(.+)$/, async (ctx) => {
     }
   }
 
-  // reset flow
   delete state.userPrivateState[admin.id];
 
-  // schedule auto-close check (soft)
+  // schedule auto-close check
   setTimeout(() => {
     maybeCloseProposal(bot, newId);
   }, draft.durationMins * 60 * 1000);
@@ -838,13 +804,11 @@ bot.callbackQuery(/^cast_(.+)_(.+)$/, async (ctx) => {
     return;
   }
 
-  // is proposal still open?
   if (!isProposalOpen(p)) {
     await ctx.reply("⏰ Voting is already closed for this proposal.");
     return;
   }
 
-  // is voter approved?
   if (!g.members[voter.id] || !g.members[voter.id].approved) {
     await ctx.reply("You are not approved to vote in this community.");
     return;
@@ -887,7 +851,6 @@ bot.command("close", async (ctx) => {
   const admin = ctx.from;
   if (chat.type !== "private") return;
 
-  // find proposals for groups where this admin is admin AND still open
   const openProposals = Object.values(state.proposals).filter((p) => {
     const g = state.groups[p.groupId];
     return g && g.adminId === admin.id && isProposalOpen(p);
@@ -923,21 +886,19 @@ bot.callbackQuery(/^forceclose_(.+)$/, async (ctx) => {
     return;
   }
 
-  // force close
   p.closedManually = true;
-  p.endsAt = Date.now(); // ensure isProposalOpen() -> false
+  p.endsAt = Date.now();
   await maybeCloseProposal(bot, proposalId);
 
   await ctx.reply(`🔒 Proposal #${proposalId} is now closed.`);
 });
 
-// /results (admin DM) -> see final or current tally (safe view)
+// /results (admin DM)
 bot.command("results", async (ctx) => {
   const chat = ctx.chat;
   const admin = ctx.from;
   if (chat.type !== "private") return;
 
-  // get proposals from groups admin controls
   const adminGroupIds = Object.entries(state.groups)
     .filter(([gid, g]) => g.adminId === admin.id)
     .map(([gid]) => parseInt(gid, 10));
@@ -983,26 +944,14 @@ bot.callbackQuery(/^showres_(.+)$/, async (ctx) => {
   await ctx.reply(summary);
 });
 
-// ===========================================
-// === SERVER STARTUP (WEBHOOK MODE)       ===
-// ===========================================
-
-const express = require("express");
-const bodyParser = require("body-parser");
-const cors = require("cors");
-
-// garante que app existe
+// =============================
+// EXPRESS + WEBHOOK BOOTSTRAP
+// =============================
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// pega env
-const TELEGRAM_BOT_TOKEN = process.env.BOT_TOKEN;
-const PUBLIC_URL =
-  process.env.PUBLIC_URL || "https://balloteer-app-production.up.railway.app";
-const PORT = process.env.PORT || 8080;
-
-// Rota que o Telegram vai chamar com os updates
+// webhook endpoint Telegram -> bot
 app.post("/telegram/webhook", async (req, res) => {
   try {
     await bot.handleUpdate(req.body);
@@ -1013,24 +962,24 @@ app.post("/telegram/webhook", async (req, res) => {
   }
 });
 
-// Healthcheck / debug
+// healthcheck
 app.get("/", (req, res) => {
   res.status(200).send("Balloteer bot is running ✅");
 });
 
+// main startup
 (async () => {
-  // 1. inicializa info do bot (importante p/ webhook mode)
+  // init bot (important for webhook mode)
   await bot.init();
 
-  // 2. sobe servidor HTTP
   const server = app.listen(PORT, async () => {
     console.log(`🚀 API listening on port ${PORT}`);
 
     try {
-      // limpa qualquer webhook antigo e pendências
+      // clear old webhook & drop pending updates
       await bot.api.deleteWebhook({ drop_pending_updates: true });
 
-      // registra o webhook ATUAL
+      // register new webhook
       await bot.api.setWebhook(`${PUBLIC_URL}/telegram/webhook`);
 
       console.log(
@@ -1042,6 +991,6 @@ app.get("/", (req, res) => {
     }
   });
 
-  // IMPORTANTE: NÃO chamar bot.start() aqui.
-  // bot.start() = long polling. Webhook já cuida dos updates.
+  // IMPORTANT: do NOT call bot.start() here.
+  // bot.start() is for polling mode, not webhook mode.
 })();
