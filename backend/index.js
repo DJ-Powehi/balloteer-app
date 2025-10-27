@@ -3,6 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
 const cors = require("cors");
+const { webhookCallback } = require("grammy");
 
 // -------------------------
 // 1. Express API
@@ -10,6 +11,8 @@ const cors = require("cors");
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+
+app.post(`/telegram-webhook/${process.env.BOT_TOKEN}`, webhookCallback(bot, "express"));
 
 // endpoint simples só pra testar deploy
 app.get("/", (req, res) => {
@@ -37,13 +40,22 @@ if (!process.env.BOT_TOKEN) {
     console.error("Bot error:", err);
   });
 
-  bot.start();
-  console.log("🤖 Telegram bot started");
-}
-
-// -------------------------
-// 3. Start HTTP server
-// -------------------------
+// 5. starta o servidor HTTP (Railway seta PORT automaticamente)
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`🚀 API listening on port ${PORT}`);
+  console.log("🤖 Telegram webhook mode active");
 });
+
+console.log(
+  "✅ Balloteer bot running with:\n" +
+    "- private voting only\n" +
+    "- DM onboarding\n" +
+    "- admin-only /new, /close, /setweight\n" +
+    "- quorum + deadline + auto-close\n" +
+    "- tie/no-vote handling in results\n" +
+    "- per-voter weights with justification\n" +
+    "- blocked repeat approvals\n" +
+    "- DM notifications to users when weight changes\n" +
+    "- webhook mode"
+);
