@@ -1,0 +1,11 @@
+[build]
+# Diz pro Railway que este serviço é Node.js
+builder = "NIXPACKS"
+
+[deploy]
+# Comando que roda quando o container sobe
+startCommand = "npm start"
+
+[vars]
+# Porta padrão que nosso Express usa
+PORT = "3000"
