@@ -51,6 +51,28 @@ adminsCommunities[adminId] = Map<groupId, { title }>
 // --------------------------------------------------
 // UTILS
 // --------------------------------------------------
+function ensureCommunityForGroupStart(groupId, titleMaybe) {
+    if (!communities[groupId]) {
+      communities[groupId] = {
+        title: titleMaybe || `Community ${groupId}`,
+        adminId: null,
+        voters: {},
+        proposals: [],
+        proposalCounter: 1,
+      };
+    } else {
+      if (titleMaybe && titleMaybe !== communities[groupId].title) {
+        communities[groupId].title = titleMaybe;
+      }
+    }
+    return communities[groupId];
+  }
+  
+function ensureCommunity(groupId) {
+  return communities[groupId] || null;
+}
+  
+
 function getChatId(ctx) {
   const chat =
     ctx.chat ||
@@ -68,20 +90,38 @@ function isPrivateChat(ctx) {
 }
 
 function ensureCommunity(groupId, titleMaybe) {
-  if (!communities[groupId]) {
+    const existing = communities[groupId];
+    if (existing) {
+      if (titleMaybe && titleMaybe !== existing.title) {
+        existing.title = titleMaybe;
+      }
+      return existing;
+    }
+  
+    // se não existe em memória, NÃO criar um novo vazio sem admin,
+    // porque isso quebra /join e outras coisas que dependem do adminId.
+    // Em vez disso, retorna null pra o caller poder ignorar.
+    return null;
+  }
+  
+  
+    // se NÃO existe em memória, vamos criar,
+    // MAS vamos tentar inicializar adminId usando o que já está no banco carregado (bootData)
+  
+    // detalhe: depois do boot, communities já DEVERIA ter isso.
+    // mas se por algum bug chegamos aqui, vamos inicializar "adminId: null"
+    // e depois corrigir quando /start for rodado.
     communities[groupId] = {
       title: titleMaybe || `Community ${groupId}`,
-      adminId: null,
+      adminId: communities[groupId]?.adminId || null, // <- isso ainda seria undefined aqui, vamos melhorar
       voters: {},
       proposals: [],
       proposalCounter: 1,
     };
-  } else {
-    if (titleMaybe && titleMaybe !== communities[groupId].title) {
-      communities[groupId].title = titleMaybe;
-    }
+  
+    return communities[groupId];
   }
-  return communities[groupId];
+  
 }
 
 function linkAdminToCommunity(adminId, groupId, title) {
@@ -373,7 +413,8 @@ bot.command("start", async (ctx) => {
     // GROUP / SUPERGROUP
     const groupTitle =
       ctx.chat?.title || `Community ${chatId}`;
-    const comm = ensureCommunity(chatId, groupTitle);
+    const comm = ensureCommunityForGroupStart(chatId, groupTitle);
+
 
     let justAssignedAdmin = false;
     if (comm.adminId === null) {
@@ -493,9 +534,16 @@ bot.command("join", async (ctx) => {
 
   for (const gid of communityIds) {
     const comm = ensureCommunity(gid);
+      if (!comm) {
+      // essa comunidade não está no cache -> provavelmente não deu /start depois do último reboot
+      continue;
+    }
     
-
-    if (!comm.adminId) continue;
+      if (!comm.adminId) {
+      // comunidade existe mas ainda não tem admin registrado em memória
+      continue;
+    }
+    
 
     // init voter record (processed=false so admin still needs to decide)
     const voter = getOrInitVoterRecord(comm, ctx.from);
