@@ -608,20 +608,52 @@ bot.command("join", async (ctx) => {
       
   }
 
-  if (notifiedAnyAdmin) {
-    await ctx.reply(
-      "✅ Your request has been sent to the admins.\n" +
-        "You'll be notified if you're approved.\n" +
-        "After approval, I will DM you for future private votes.\n" +
-        "You don't need to speak in the group."
-    );
-  } else {
-    await ctx.reply(
-      "I couldn't notify any admin (maybe they haven't DM'd me yet).\n" +
-        "Ask an admin to /start me in DM."
-    );
+// depois do loop for (const gid of communityIds) { ... }
+
+let alreadyProcessedSomewhere = false;
+let alreadyApprovedSomewhere = false;
+
+for (const gid of communityIds) {
+  const comm = communities[gid];
+  if (!comm) continue;
+  const v = comm.voters[userId];
+  if (!v) continue;
+
+  if (v.processed === true) {
+    alreadyProcessedSomewhere = true;
+    if (v.approved === true && v.weight > 0) {
+      alreadyApprovedSomewhere = true;
+    }
   }
-});
+}
+
+  if (notifiedAnyAdmin) {
+    // avisamos pelo menos um admin AGORA
+    await ctx.reply(
+        "✅ Your request was sent to the admin.\nYou'll get a DM if you're approved."
+    );
+
+    } else if (alreadyApprovedSomewhere) {
+    // admin já tinha aprovado antes
+    await ctx.reply(
+        "✅ You are already approved to vote in this community.\nUse /myvote to see active proposals."
+    );
+
+    } else if (alreadyProcessedSomewhere) {
+    // admin já viu você e decidiu (provavelmente rejeitou)
+    await ctx.reply(
+        "❌ Your request was already reviewed by the admin.\nIf circumstances changed, ask the admin directly."
+    );
+
+    } else {
+    // não conseguimos nem pingar admin
+    await ctx.reply(
+        "⚠️ I couldn't notify the admin (maybe they haven't DM'd me yet).\nAsk the admin to /start me in DM so I can message them."
+    );
+    }
+
+  }
+);
 
 // admin approves preset weight
 bot.callbackQuery(/approve_(-?\d+)_(-?\d+)_(\d+)/, async (ctx) => {
