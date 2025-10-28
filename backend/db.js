@@ -2,9 +2,9 @@ const { Pool } = require("pg");
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // se Railway precisar de ssl:
-  // ssl: { rejectUnauthorized: false },
+  ssl: { rejectUnauthorized: false },
 });
+
 
 async function query(text, params) {
   const res = await pool.query(text, params);

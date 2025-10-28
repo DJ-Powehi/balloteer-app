@@ -6,13 +6,20 @@ const cors = require("cors");
 const { Bot, InlineKeyboard } = require("grammy");
 
 const {
-  loadAllCommunities,
-  upsertCommunity,
-  updateProposalCounter,
-  upsertVoter,
-  upsertProposal,
-} = require("./db");
-
+    loadAllCommunities,
+    upsertCommunity,
+    upsertVoter,
+    upsertProposal,
+    updateProposalCounter,
+  } = require("./db");
+  
+  // ESTADO IN-MEMORY (vai começar vazio, mas já já vamos preencher com o banco)
+  let communities = {};
+  let adminsCommunities = {};
+  const pendingCustomWeight = {};
+  const draftProposal = {};
+  const waitingMyVoteSelection = {};
+  const pendingSetWeight = {};
 // ===== ENV =====
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 8080;
@@ -40,14 +47,6 @@ communities[groupId] = {
 
 adminsCommunities[adminId] = Map<groupId, { title }>
 */
-let communities = {};
-let adminsCommunities = {};
-
-// estes fluxos podem morrer se reiniciar, tudo bem
-const pendingCustomWeight = {};
-const draftProposal = {};
-const waitingMyVoteSelection = {};
-const pendingSetWeight = {};
 
 // --------------------------------------------------
 // UTILS
@@ -1668,38 +1667,44 @@ app.get("/", (req, res) => {
 
 // startup
 (async () => {
-  // init bot info (important for webhook mode because we reference bot.botInfo.username)
-  await bot.init();
-
-  // [DB] carregar tudo do banco -> memória
-  const loaded = await loadAllCommunities();
-  communities = loaded.communities;
-  adminsCommunities = loaded.adminsCommunities;
-
-  const server = app.listen(PORT, async () => {
-    console.log(`🚀 API listening on port ${PORT}`);
-
-    try {
-      await bot.api.deleteWebhook({ drop_pending_updates: true });
-      await bot.api.setWebhook(`${PUBLIC_URL}/telegram/webhook`);
-
-      console.log("📡 Webhook registered at", `${PUBLIC_URL}/telegram/webhook`);
-      console.log(
-        "✅ Balloteer bot running with:\n" +
-          "- private voting only\n" +
-          "- DM onboarding\n" +
-          "- admin-only /new, /close, /setweight\n" +
-          "- quorum + deadline + auto-close\n" +
-          "- tie/no-vote handling in results\n" +
-          "- per-voter weights with justification\n" +
-          "- blocked repeat approvals\n" +
-          "- DM notifications to users when weight changes\n" +
-          "- 💾 Postgres persistence"
-      );
-    } catch (err) {
-      console.error("❌ Failed to set webhook:", err);
-    }
-  });
-
-  // IMPORTANT: DO NOT call bot.start() here. webhook mode only.
-})();
+    // init bot info (importante pro webhook mode porque usamos bot.botInfo.username)
+    await bot.init();
+  
+    // 1. carrega comunidades / voters / proposals do Postgres
+    const bootData = await loadAllCommunities();
+    communities = bootData.communities;
+    adminsCommunities = bootData.adminsCommunities;
+    console.log("💾 Loaded from DB:", Object.keys(communities));
+  
+    const server = app.listen(PORT, async () => {
+      console.log(`🚀 API listening on port ${PORT}`);
+  
+      try {
+        // clear old webhook & drop_pending_updates so a gente não pega backlog do polling
+        await bot.api.deleteWebhook({ drop_pending_updates: true });
+  
+        // registra o webhook no Telegram
+        await bot.api.setWebhook(`${PUBLIC_URL}/telegram/webhook`);
+  
+        console.log("📡 Webhook registered at", `${PUBLIC_URL}/telegram/webhook`);
+        console.log(
+          "✅ Balloteer bot running with:\n" +
+            "- private voting only\n" +
+            "- DM onboarding\n" +
+            "- admin-only /new, /close, /setweight\n" +
+            "- quorum + deadline + auto-close\n" +
+            "- tie/no-vote handling in results\n" +
+            "- per-voter weights with justification\n" +
+            "- blocked repeat approvals\n" +
+            "- DM notifications to users when weight changes\n" +
+            "- 🔄 Postgres persistence (communities, voters, proposals)"
+        );
+      } catch (err) {
+        console.error("❌ Failed to set webhook:", err);
+      }
+    });
+  
+    // IMPORTANTE: NÃO chamar bot.start()
+    // bot.start() é só pra long polling, não pra webhook.
+  })();
+  
