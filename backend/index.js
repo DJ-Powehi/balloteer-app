@@ -6,20 +6,21 @@ const cors = require("cors");
 const { Bot, InlineKeyboard } = require("grammy");
 
 const {
-    loadAllCommunities,
-    upsertCommunity,
-    upsertVoter,
-    upsertProposal,
-    updateProposalCounter,
-  } = require("./db");
-  
-  // ESTADO IN-MEMORY (vai começar vazio, mas já já vamos preencher com o banco)
-  let communities = {};
-  let adminsCommunities = {};
-  const pendingCustomWeight = {};
-  const draftProposal = {};
-  const waitingMyVoteSelection = {};
-  const pendingSetWeight = {};
+  loadAllCommunities,
+  upsertCommunity,
+  upsertVoter,
+  upsertProposal,
+  updateProposalCounter,
+} = require("./db");
+
+// ===== IN-MEMORY CACHE (preenchido no boot pelo Postgres) =====
+let communities = {};
+let adminsCommunities = {};
+const pendingCustomWeight = {};
+const draftProposal = {};
+const waitingMyVoteSelection = {};
+const pendingSetWeight = {};
+
 // ===== ENV =====
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 8080;
@@ -35,44 +36,46 @@ if (!BOT_TOKEN) {
 const bot = new Bot(BOT_TOKEN);
 
 /**
-IN-MEMORY CACHE (agora é cache, mas será persistido em Postgres também)
+CACHE SHAPE
 
 communities[groupId] = {
-  title,
-  adminId,
-  voters: { userId: {approved, weight, ...} },
-  proposals: [ { ... } ],
-  proposalCounter
+  title: string,
+  adminId: number,
+  voters: {
+    [userId]: {
+      approved: boolean,
+      weight: number | null,
+      processed: boolean,
+      username: string,
+      walletAddress: string | null,
+      lastChangeReason: string | null,
+      lastModifiedAt: string | null,
+    }
+  },
+  proposals: [{
+    id: number,
+    title: string,
+    options: string[],
+    votes: { [optionIdx]: totalWeight },
+    voterMap: { [userId]: optionIdx },
+    status: "open" | "closed",
+    quorumWeight: number | null,
+    endsAt: number | null,
+    createdBy: number,
+    attachmentFileId: string | null,
+    attachmentFileName: string | null,
+  }],
+  proposalCounter: number,
 }
 
-adminsCommunities[adminId] = Map<groupId, { title }>
-*/
+adminsCommunities[adminId] = Map<groupId, { title: string }>
+**/
 
 // --------------------------------------------------
 // UTILS
 // --------------------------------------------------
-function ensureCommunityForGroupStart(groupId, titleMaybe) {
-    if (!communities[groupId]) {
-      communities[groupId] = {
-        title: titleMaybe || `Community ${groupId}`,
-        adminId: null,
-        voters: {},
-        proposals: [],
-        proposalCounter: 1,
-      };
-    } else {
-      if (titleMaybe && titleMaybe !== communities[groupId].title) {
-        communities[groupId].title = titleMaybe;
-      }
-    }
-    return communities[groupId];
-  }
-  
-function ensureCommunity(groupId) {
-  return communities[groupId] || null;
-}
-  
 
+// pega sempre o chatId certo (group ou DM)
 function getChatId(ctx) {
   const chat =
     ctx.chat ||
@@ -81,6 +84,7 @@ function getChatId(ctx) {
   return chat ? chat.id : null;
 }
 
+// detecta se é chat privado
 function isPrivateChat(ctx) {
   const t =
     ctx.chat?.type ||
@@ -89,41 +93,40 @@ function isPrivateChat(ctx) {
   return t === "private";
 }
 
-function ensureCommunity(groupId, titleMaybe) {
-    const existing = communities[groupId];
-    if (existing) {
-      if (titleMaybe && titleMaybe !== existing.title) {
-        existing.title = titleMaybe;
-      }
-      return existing;
-    }
-  
-    // se não existe em memória, NÃO criar um novo vazio sem admin,
-    // porque isso quebra /join e outras coisas que dependem do adminId.
-    // Em vez disso, retorna null pra o caller poder ignorar.
-    return null;
-  }
-  
-  
-    // se NÃO existe em memória, vamos criar,
-    // MAS vamos tentar inicializar adminId usando o que já está no banco carregado (bootData)
-  
-    // detalhe: depois do boot, communities já DEVERIA ter isso.
-    // mas se por algum bug chegamos aqui, vamos inicializar "adminId: null"
-    // e depois corrigir quando /start for rodado.
+/**
+ * ensureCommunityForGroupStart(...)
+ * - usada SÓ dentro do /start quando o bot é adicionado num grupo
+ * - se não existir ainda em memória, cria a comunidade
+ * - também atualiza o título do grupo se mudou
+ */
+function ensureCommunityForGroupStart(groupId, titleMaybe) {
+  if (!communities[groupId]) {
     communities[groupId] = {
       title: titleMaybe || `Community ${groupId}`,
-      adminId: communities[groupId]?.adminId || null, // <- isso ainda seria undefined aqui, vamos melhorar
+      adminId: null,
       voters: {},
       proposals: [],
       proposalCounter: 1,
     };
-  
-    return communities[groupId];
+  } else {
+    if (titleMaybe && titleMaybe !== communities[groupId].title) {
+      communities[groupId].title = titleMaybe;
+    }
   }
-  
+  return communities[groupId];
 }
 
+/**
+ * ensureCommunity(groupId)
+ * - usada em fluxos tipo /join, etc
+ * - NÃO cria comunidade nova "do nada"
+ * - se não existir no cache, retorna null
+ */
+function ensureCommunity(groupId) {
+  return communities[groupId] || null;
+}
+
+// liga admin ↔ comunidade (tabela lateral adminsCommunities)
 function linkAdminToCommunity(adminId, groupId, title) {
   if (!adminsCommunities[adminId]) {
     adminsCommunities[adminId] = new Map();
@@ -131,6 +134,7 @@ function linkAdminToCommunity(adminId, groupId, title) {
   adminsCommunities[adminId].set(groupId, { title });
 }
 
+// pega (ou inicializa) o registro do votante dentro da comunidade
 function getOrInitVoterRecord(comm, fromUser) {
   const uid = fromUser.id;
   if (!comm.voters[uid]) {
@@ -146,6 +150,7 @@ function getOrInitVoterRecord(comm, fromUser) {
       lastModifiedAt: null,
     };
   } else {
+    // atualiza display name
     comm.voters[uid].username = fromUser.username
       ? `@${fromUser.username}`
       : (fromUser.first_name || comm.voters[uid].username);
@@ -163,10 +168,12 @@ function getOrInitVoterRecord(comm, fromUser) {
   return comm.voters[uid];
 }
 
+// checa se userId é admin daquela comunidade
 function isAdmin(comm, userId) {
   return comm.adminId !== null && comm.adminId === userId;
 }
 
+// desenha barrinha "███░░░"
 function makeBar(pct) {
   const barLength = 10;
   const filledLen = Math.round((pct / 100) * barLength);
@@ -181,7 +188,7 @@ function calcTotalWeight(proposal) {
   return totalWeight;
 }
 
-// decides winner/tie/no-votes
+// decide quem ganhou / empate / zero votos
 function calcWinnerInfo(proposal) {
   const total = calcTotalWeight(proposal);
 
@@ -315,7 +322,7 @@ async function autoCloseExpiredProposals(groupId) {
 async function finalizeProposal(comm, groupId, proposal) {
   proposal.status = "closed";
 
-  // [DB] persist proposal close
+  // salva no banco já fechado
   await upsertProposal(groupId, proposal);
 
   const finalMsg = formatResultsSummaryForGroup(proposal);
@@ -327,7 +334,7 @@ async function finalizeProposal(comm, groupId, proposal) {
   }
 }
 
-// format private DM ballot
+// mensagem privada pro votante
 function formatProposalForDM(proposal, voterWeight) {
   const deadlineText = proposal.endsAt
     ? `Voting closes at: ${new Date(proposal.endsAt).toISOString()}\n`
@@ -390,7 +397,7 @@ function buildMyVoteKeyboardForUser(userId) {
   return kb;
 }
 
-// helper for callbackQuery alert popups
+// helper de popup em callbackQuery
 async function popup(ctx, text) {
   try {
     await ctx.answerCallbackQuery({
@@ -399,6 +406,7 @@ async function popup(ctx, text) {
     });
   } catch (e) {}
 }
+
 
 // --------------------------------------------------
 // COMMANDS / CALLBACKS
