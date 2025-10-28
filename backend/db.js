@@ -163,38 +163,55 @@ async function upsertVoter(groupId, userId, record) {
 
 // salva/atualiza proposta inteira
 async function upsertProposal(groupId, proposalObj) {
-  await query(
-    `INSERT INTO proposals
-      (group_id, proposal_id, title, options, votes, voter_map, status, quorum_weight, ends_at, created_by, attachment_file_id, attachment_file_name)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-     ON CONFLICT (group_id, proposal_id)
-     DO UPDATE SET
-       title = EXCLUDED.title,
-       options = EXCLUDED.options,
-       votes = EXCLUDED.votes,
-       voter_map = EXCLUDED.voter_map,
-       status = EXCLUDED.status,
-       quorum_weight = EXCLUDED.quorum_weight,
-       ends_at = EXCLUDED.ends_at,
-       created_by = EXCLUDED.created_by,
-       attachment_file_id = EXCLUDED.attachment_file_id,
-       attachment_file_name = EXCLUDED.attachment_file_name`,
-    [
-      groupId,
-      proposalObj.id,
-      proposalObj.title,
-      proposalObj.options,
-      proposalObj.votes,
-      proposalObj.voterMap,
-      proposalObj.status,
-      proposalObj.quorumWeight,
-      proposalObj.endsAt,
-      proposalObj.createdBy,
-      proposalObj.attachmentFileId,
-      proposalObj.attachmentFileName,
-    ]
-  );
-}
+    // Garante que as colunas jsonb recebam JSON válido
+    const optionsJson = JSON.stringify(proposalObj.options || []);
+    const votesJson = JSON.stringify(proposalObj.votes || {});
+    const voterMapJson = JSON.stringify(proposalObj.voterMap || {});
+  
+    await query(
+      `INSERT INTO proposals
+        (group_id,
+         proposal_id,
+         title,
+         options,
+         votes,
+         voter_map,
+         status,
+         quorum_weight,
+         ends_at,
+         created_by,
+         attachment_file_id,
+         attachment_file_name)
+       VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12)
+       ON CONFLICT (group_id, proposal_id)
+       DO UPDATE SET
+         title = EXCLUDED.title,
+         options = EXCLUDED.options,
+         votes = EXCLUDED.votes,
+         voter_map = EXCLUDED.voter_map,
+         status = EXCLUDED.status,
+         quorum_weight = EXCLUDED.quorum_weight,
+         ends_at = EXCLUDED.ends_at,
+         created_by = EXCLUDED.created_by,
+         attachment_file_id = EXCLUDED.attachment_file_id,
+         attachment_file_name = EXCLUDED.attachment_file_name`,
+      [
+        groupId,
+        proposalObj.id,
+        proposalObj.title,
+        optionsJson,     // $4
+        votesJson,       // $5
+        voterMapJson,    // $6
+        proposalObj.status,
+        proposalObj.quorumWeight,
+        proposalObj.endsAt,
+        proposalObj.createdBy,
+        proposalObj.attachmentFileId,
+        proposalObj.attachmentFileName,
+      ]
+    );
+  }
+  
 
 module.exports = {
   query,
