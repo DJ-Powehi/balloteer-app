@@ -381,8 +381,6 @@ bot.command("start", async (ctx) => {
       justAssignedAdmin = true;
     }
 
-    // [DB] persist comunidade
-    await upsertCommunity(chatId, comm.title, comm.adminId);
 
     linkAdminToCommunity(
       comm.adminId,
@@ -391,9 +389,13 @@ bot.command("start", async (ctx) => {
     );
 
     const voter = getOrInitVoterRecord(comm, ctx.from);
+    // ⬅ ADD THIS: salva comunidade, contador inicial e o próprio admin como voter
+    await upsertCommunity(chatId, comm.title, comm.adminId);
+    await updateProposalCounter(chatId, comm.proposalCounter);
+    await upsertVoter(chatId, ctx.from.id, comm.voters[ctx.from.id]);
+
 
     // [DB] persist admin como voter também
-    await upsertVoter(chatId, ctx.from.id, voter);
 
     await ctx.reply(
       "👋 Balloteer is now active in this community.\n\n" +
@@ -491,6 +493,7 @@ bot.command("join", async (ctx) => {
 
   for (const gid of communityIds) {
     const comm = ensureCommunity(gid);
+    
 
     if (!comm.adminId) continue;
 
@@ -504,6 +507,9 @@ bot.command("join", async (ctx) => {
     if (voter.processed === true) {
       continue;
     }
+    // ⬅ ADD THIS
+    await upsertVoter(gid, ctx.from.id, voter);
+
 
     const infoText =
       "🔔 New voter request:\n\n" +
@@ -535,14 +541,15 @@ bot.command("join", async (ctx) => {
       .row()
       .text("Reject", `reject_${gid}_${userId}`);
 
-    try {
-      await bot.api.sendMessage(comm.adminId, infoText, {
-        reply_markup: kb,
-      });
-      notifiedAnyAdmin = true;
-    } catch (e) {
-      // can't DM admin yet, ignore
-    }
+      try {
+        await bot.api.sendMessage(Number(comm.adminId), infoText, {
+          reply_markup: kb,
+        });
+        notifiedAnyAdmin = true;
+      } catch (e) {
+        console.error("Failed to DM admin", comm.adminId, e);
+      }
+      
   }
 
   if (notifiedAnyAdmin) {
@@ -593,6 +600,7 @@ bot.callbackQuery(/approve_(-?\d+)_(-?\d+)_(\d+)/, async (ctx) => {
   voter.walletAddress = voter.walletAddress || null;
   voter.lastChangeReason = "initial approval";
   voter.lastModifiedAt = new Date().toISOString();
+
 
   // [DB] persist aprovação
   await upsertVoter(groupId, targetUserId, voter);
@@ -1548,15 +1556,13 @@ bot.callbackQuery(/publish_(-?\d+)/, async (ctx) => {
   };
 
   comm.proposals.push(newProposal);
-
-  // [DB] salvar counter atualizado
-  await updateProposalCounter(groupId, comm.proposalCounter);
-
-  // [DB] salvar proposta recém criada
-  await upsertProposal(groupId, newProposal);
-
   // limpamos o draft em memória
   delete draftProposal[adminId];
+
+  // ⬅ ADD THIS
+  await upsertProposal(groupId, newProposal);
+  await updateProposalCounter(groupId, comm.proposalCounter);
+
 
   await ctx.answerCallbackQuery({ text: "Published!" });
 
@@ -1674,6 +1680,7 @@ app.get("/", (req, res) => {
     const bootData = await loadAllCommunities();
     communities = bootData.communities;
     adminsCommunities = bootData.adminsCommunities;
+    console.log("adminsCommunities keys =", Object.keys(adminsCommunities));
     console.log("💾 Loaded from DB:", Object.keys(communities));
   
     const server = app.listen(PORT, async () => {
