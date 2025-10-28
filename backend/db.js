@@ -14,6 +14,7 @@ async function query(text, params) {
 // =============== LOADERS (startup) ===============
 
 async function loadAllCommunities() {
+    // 1. Carrega comunidades
     const commsRes = await query(
       "SELECT group_id, title, admin_id FROM communities",
       []
@@ -23,30 +24,30 @@ async function loadAllCommunities() {
     const adminsCommunities = {};
   
     for (const row of commsRes.rows) {
-      // força tudo a string pra ser consistente nas chaves
-      const groupIdStr = String(row.group_id);
-      const adminIdStr = row.admin_id != null ? String(row.admin_id) : null;
+      const groupIdNum = Number(row.group_id);
+      const adminIdNum = row.admin_id !== null ? Number(row.admin_id) : null;
+      const groupIdStr = String(groupIdNum); // usamos string como chave do objeto communities
   
       communities[groupIdStr] = {
         title: row.title,
-        adminId: row.admin_id != null ? Number(row.admin_id) : null,
+        adminId: adminIdNum, // sempre Number ou null
         voters: {},
         proposals: [],
         proposalCounter: 1,
       };
   
-      if (adminIdStr) {
-        if (!adminsCommunities[adminIdStr]) {
-          adminsCommunities[adminIdStr] = new Map();
+      // monta adminsCommunities[adminId] = Map(groupId -> { title })
+      if (adminIdNum !== null) {
+        if (!adminsCommunities[adminIdNum]) {
+          adminsCommunities[adminIdNum] = new Map();
         }
-        adminsCommunities[adminIdStr].set(Number(row.group_id), {
+        adminsCommunities[adminIdNum].set(groupIdNum, {
           title: row.title,
         });
       }
     }
   
-    // ... resto (counters, voters, proposals) precisa usar groupIdStr também
-    // então ajusta abaixo também:
+    // 2. Carrega counters
     const countersRes = await query(
       "SELECT group_id, counter FROM proposal_counters",
       []
@@ -58,15 +59,17 @@ async function loadAllCommunities() {
       }
     }
   
+    // 3. Carrega voters
     const votersRes = await query(
-      "SELECT group_id, user_id, username, approved, weight, processed, wallet_address, last_change_reason, last_modified_at FROM voters",
+      `SELECT group_id, user_id, username, approved, weight, processed,
+              wallet_address, last_change_reason, last_modified_at
+       FROM voters`,
       []
     );
     for (const v of votersRes.rows) {
       const gidStr = String(v.group_id);
       if (!communities[gidStr]) continue;
   
-      // IMPORTANTE: manter user_id como Number pra lógica atual
       const uidNum = Number(v.user_id);
   
       communities[gidStr].voters[uidNum] = {
@@ -77,40 +80,49 @@ async function loadAllCommunities() {
         walletAddress: v.wallet_address,
         lastChangeReason: v.last_change_reason,
         lastModifiedAt: v.last_modified_at
-          ? v.last_modified_at.toISOString()
+          ? (typeof v.last_modified_at === "string"
+              ? v.last_modified_at
+              : new Date(v.last_modified_at).toISOString())
           : null,
       };
     }
   
+    // 4. Carrega proposals
     const propsRes = await query(
-      "SELECT group_id, proposal_id, title, options, votes, voter_map, status, quorum_weight, ends_at, created_by, attachment_file_id, attachment_file_name FROM proposals",
+      `SELECT group_id, proposal_id, title, options, votes, voter_map,
+              status, quorum_weight, ends_at, created_by,
+              attachment_file_id, attachment_file_name
+       FROM proposals`,
       []
     );
+  
     for (const p of propsRes.rows) {
       const gidStr = String(p.group_id);
       if (!communities[gidStr]) continue;
   
       communities[gidStr].proposals.push({
-        id: p.proposal_id,
+        id: Number(p.proposal_id),
         title: p.title,
-        options: p.options || [],
-        votes: p.votes || {},
+        options: Array.isArray(p.options) ? p.options : [], // sanity
+        votes: p.votes || {}, // já vem como objeto jsonb
         voterMap: p.voter_map || {},
         status: p.status,
         quorumWeight: p.quorum_weight,
-        endsAt: p.ends_at,
-        createdBy: p.created_by,
+        endsAt: p.ends_at === null ? null : Number(p.ends_at),
+        createdBy: p.created_by ? Number(p.created_by) : null,
         attachmentFileId: p.attachment_file_id,
         attachmentFileName: p.attachment_file_name,
       });
     }
   
+    // garantir ordenação previsível de proposals
     for (const comm of Object.values(communities)) {
       comm.proposals.sort((a, b) => a.id - b.id);
     }
   
     return { communities, adminsCommunities };
   }
+  
   
 // =============== WRITERS (mutations) ===============
 
