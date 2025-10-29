@@ -1,17 +1,24 @@
 {
     "name": "balloteer-app",
     "version": "1.0.0",
-    "private": true,
+    "description": "Balloteer – Telegram voting with weights, quorum and ZK privacy.",
+    "main": "backend/index.js",
     "scripts": {
-        "start": "node backend/index.js",
-        "dev": "node backend/index.js"
+      "start": "node backend/index.js",
+      "dev": "node backend/index.js"
     },
     "dependencies": {
-        "body-parser": "^1.20.3",
-        "cors": "^2.8.5",
-        "dotenv": "^17.2.3",
-        "express": "^4.19.2",
-        "grammy": "^1.38.3",
-        "pg": "^8.16.3"
-    }
-}
+      "axios": "^1.6.7",
+      "dotenv": "^17.2.3",
+      "express": "^4.19.2",
+      "fastify": "^4.26.2",
+      "grammy": "^1.22.0",
+      "pg": "^8.11.5"
+    },
+    "engines": {
+      "node": ">=18"
+    },
+    "author": "Balloteer Team",
+    "license": "MIT"
+  }
+  
