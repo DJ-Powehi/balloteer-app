@@ -1,4 +1,4 @@
-// components/GuideSection.jsx
+// components/GuideSection.jsx tyty
 "use client";
 import { useState } from "react";
 
