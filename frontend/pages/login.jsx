@@ -1,8 +1,30 @@
 // frontend/pages/login.jsx
-import { usePrivy } from "@privy-io/react-auth";
+import { useRouter } from "next/router";
+import { useEffect } from "react";
+import { usePrivy, useWallets } from "@privy-io/react-auth";
 
 export default function LoginPage() {
-  const { login } = usePrivy();
+  const router = useRouter();
+  const { tg_id } = router.query;
+  const { login, authenticated, user } = usePrivy();
+  const { wallets } = useWallets();
+
+  useEffect(() => {
+    if (!authenticated) return;
+    if (!tg_id) return;
+    if (!wallets?.[0]) return;
+
+    // manda pro backend
+    fetch("https://SEU-BACKEND-RAILWAY/api/link-telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        telegram_id: tg_id,
+        privy_id: user.id,
+        wallet: wallets[0].address,
+      }),
+    }).catch(console.error);
+  }, [authenticated, tg_id, user, wallets]);
 
   return (
     <div className="min-h-screen bg-black text-white flex items-center justify-center">
@@ -28,33 +50,4 @@ export default function LoginPage() {
       </div>
     </div>
   );
-}
-import { useRouter } from "next/router";
-import { useEffect } from "react";
-import { usePrivy, useWallets } from "@privy-io/react-auth";
-
-export default function LoginPage() {
-  const router = useRouter();
-  const { tg_id } = router.query;
-  const { authenticated, user } = usePrivy();
-  const { wallets } = useWallets();
-
-  useEffect(() => {
-    if (!authenticated) return;
-    if (!tg_id) return;
-    if (!wallets?.[0]) return;
-
-    // manda pro backend
-    fetch("https://SEU-BACKEND-RAILWAY/api/link-telegram", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        telegram_id: tg_id,
-        privy_id: user.id,
-        wallet: wallets[0].address,
-      }),
-    }).catch(console.error);
-  }, [authenticated, tg_id, user, wallets]);
-  
-  // ... resto do componente
 }

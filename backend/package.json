@@ -1,19 +1,19 @@
 {
-  "dependencies": {
-    "body-parser": "^2.2.0",
-    "cors": "^2.8.5",
-    "dotenv": "^17.2.3",
-    "express": "^5.1.0",
-    "grammy": "^1.38.3"
-  },
-  "name": "telegram_bot",
+  "name": "balloteer-app",
   "version": "1.0.0",
-  "main": "bot.js",
+  "description": "Balloteer backend + telegram bot",
+  "main": "backend/index.js",
+  "type": "commonjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node backend/index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": ""
+  "dependencies": {
+    "axios": "^1.6.8",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "grammy": "^1.26.1",
+    "pg": "^8.11.5"
+  }
 }
+
