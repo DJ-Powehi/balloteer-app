@@ -259,3 +259,60 @@ module.exports = {
   upsertVoter,
   upsertProposal,
 };
+
+// db.js
+import pkg from "pg";
+const { Pool } = pkg;
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : false,
+});
+
+// 1. pegar user pelo telegram
+export async function getUserByTelegramId(telegram_id) {
+  const res = await pool.query(
+    `SELECT * FROM users_telegram WHERE telegram_id = $1`,
+    [telegram_id]
+  );
+  return res.rows[0] || null;
+}
+
+// 2. upsert (usado lá no /api/link-telegram)
+export async function upsertTelegramUser({ telegram_id, privy_id, wallet_address }) {
+  await pool.query(
+    `
+    INSERT INTO users_telegram (telegram_id, privy_id, wallet_address)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (telegram_id)
+    DO UPDATE SET
+      privy_id = EXCLUDED.privy_id,
+      wallet_address = EXCLUDED.wallet_address;
+  `,
+    [telegram_id, privy_id, wallet_address]
+  );
+}
+
+// 3. criar pedido de entrada no grupo
+export async function createJoinRequest({
+  group_id,
+  telegram_id,
+  wallet_address,
+  display_name,
+}) {
+  // se tua tabela for outra, troca aqui
+  await pool.query(
+    `
+    INSERT INTO group_members (group_id, telegram_id, wallet_address, display_name, status)
+    VALUES ($1, $2, $3, $4, 'pending')
+    ON CONFLICT (group_id, telegram_id)
+    DO UPDATE SET
+      wallet_address = EXCLUDED.wallet_address,
+      status = 'pending';
+  `,
+    [group_id, telegram_id, wallet_address, display_name]
+  );
+}
+
+export { pool };
+

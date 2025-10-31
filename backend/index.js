@@ -35,6 +35,19 @@ if (!BOT_TOKEN) {
 // create bot (webhook mode)
 const bot = new Bot(BOT_TOKEN);
 
+app.get("/api/telegram-user/:tgId", async (req, res) => {
+  const tgId = req.params.tgId;
+  const row = await pool.query(
+    "SELECT telegram_id, privy_id, wallet_address FROM users_telegram WHERE telegram_id = $1",
+    [tgId]
+  );
+  if (row.rows.length === 0) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  return res.json(row.rows[0]);
+});
+
+
 /**
 CACHE SHAPE
 
@@ -92,6 +105,22 @@ function isPrivateChat(ctx) {
     ctx.update?.callback_query?.message?.chat?.type;
   return t === "private";
 }
+
+// no bot/index.js (ou onde você registra comandos)
+bot.command("link", async (ctx) => {
+  const tgId = ctx.from.id; // id do telegram
+  const baseUrl = "https://balloteer.xyz/login"; // sua página que já tem o privy
+  const link = `${baseUrl}?tg_id=${tgId}`;
+
+  await ctx.reply(
+    "To connect your Telegram to Balloteer, open this link and login:",
+    {
+      reply_markup: {
+        inline_keyboard: [[{ text: "Connect Balloteer", url: link }]],
+      },
+    }
+  );
+});
 
 /**
  * ensureCommunityForGroupStart(...)
@@ -508,32 +537,58 @@ bot.command("join", async (ctx) => {
   const chatId = getChatId(ctx);
   if (chatId === null) return;
 
+  // 1) se não for DM, manda o cara ir pro DM
   if (!isPrivateChat(ctx)) {
-    // user tried /join in a group
     try {
       await bot.api.sendMessage(
         ctx.from.id,
-        "To request voting access, please send /join here in private.\n" +
-          "I will notify the admin for approval."
+        "To request voting access, please send /join here in private.\nI will notify the admin for approval."
       );
     } catch (e) {
       await ctx.reply(
-        "Please DM me first @" +
-          bot.botInfo.username +
-          " and send /join."
+        "Please DM me first @" + bot.botInfo.username + " and send /join."
       );
     }
     return;
   }
 
-  // DM case
+  // ---------------------------------------
+  // 2) DM MESMO → primeiro checamos se já fez login na web (Privy)
+  // ---------------------------------------
   const userId = ctx.from.id;
+  const backendBase = process.env.BACKEND_URL; // <<< coloca no .env do bot
+
+  let userFromBackend = null;
+  try {
+    const resp = await fetch(
+      `${backendBase}/api/telegram-user/${userId}`
+    );
+    if (resp.ok) {
+      userFromBackend = await resp.json();
+    }
+  } catch (err) {
+    console.error("error checking privy user:", err);
+  }
+
+  // se não existe ou não tem wallet, barra aqui
+  if (!userFromBackend || !userFromBackend.wallet_address) {
+    const loginUrl = `https://balloteer.xyz/login?tg_id=${userId}`;
+    await ctx.reply(
+      "⚠️ You need to login on the web first so we can bind your Telegram to a wallet.\n" +
+        "Click the link below, login with Telegram, and then come back here and send /join again:\n\n" +
+        loginUrl
+    );
+    return;
+  }
+
+  // ---------------------------------------
+  // 3) se chegou aqui → TEM WALLET → agora segue teu fluxo normal
+  // ---------------------------------------
   const communityIds = Object.keys(communities).map(Number);
 
   if (communityIds.length === 0) {
     await ctx.reply(
-      "There are no active communities yet.\n" +
-        "Ask an admin to /start me in a group first."
+      "There are no active communities yet.\nAsk an admin to /start me in a group first."
     );
     return;
   }
@@ -542,19 +597,15 @@ bot.command("join", async (ctx) => {
 
   for (const gid of communityIds) {
     const comm = ensureCommunity(gid);
-      if (!comm) {
-      // essa comunidade não está no cache -> provavelmente não deu /start depois do último reboot
-      continue;
-    }
-    
-      if (!comm.adminId) {
-      // comunidade existe mas ainda não tem admin registrado em memória
-      continue;
-    }
-    
+    if (!comm) continue;
+    if (!comm.adminId) continue;
 
     // init voter record (processed=false so admin still needs to decide)
     const voter = getOrInitVoterRecord(comm, ctx.from);
+
+    // 🔒 IMPORTANTE: já guarda a wallet que veio do backend
+    voter.walletAddress = userFromBackend.wallet_address;
+    voter.privyId = userFromBackend.privy_id || null;
 
     // [DB] persist estado atual do pedido
     await upsertVoter(gid, userId, voter);
@@ -563,256 +614,76 @@ bot.command("join", async (ctx) => {
     if (voter.processed === true) {
       continue;
     }
-    // ⬅ ADD THIS
-    await upsertVoter(gid, ctx.from.id, voter);
-
 
     const infoText =
       "🔔 New voter request:\n\n" +
       `Community: ${comm.title} (id ${gid})\n` +
       `Name: ${ctx.from.first_name || ""} ${ctx.from.last_name || ""}\n` +
       `Username: ${
-        ctx.from.username
-          ? "@" + ctx.from.username
-          : "(no username)"
+        ctx.from.username ? "@" + ctx.from.username : "(no username)"
       }\n` +
-      `Telegram ID: ${userId}\n\n` +
+      `Telegram ID: ${userId}\n` +
+      `Wallet: ${userFromBackend.wallet_address}\n\n` +
       "Assign voting power:";
 
     const kb = new InlineKeyboard()
-      .text(
-        "Approve (1 weight)",
-        `approve_${gid}_${userId}_1`
-      )
+      .text("Approve (1 weight)", `approve_${gid}_${userId}_1`)
       .row()
-      .text(
-        "Approve (3 weight)",
-        `approve_${gid}_${userId}_3`
-      )
+      .text("Approve (3 weight)", `approve_${gid}_${userId}_3`)
       .row()
-      .text(
-        "Approve (custom)",
-        `custom_${gid}_${userId}`
-      )
+      .text("Approve (custom)", `custom_${gid}_${userId}`)
       .row()
       .text("Reject", `reject_${gid}_${userId}`);
 
-      try {
-        await bot.api.sendMessage(Number(comm.adminId), infoText, {
-          reply_markup: kb,
-        });
-        notifiedAnyAdmin = true;
-      } catch (e) {
-        console.error("Failed to DM admin", comm.adminId, e);
-      }
-      
-  }
-
-// depois do loop for (const gid of communityIds) { ... }
-
-let alreadyProcessedSomewhere = false;
-let alreadyApprovedSomewhere = false;
-
-for (const gid of communityIds) {
-  const comm = communities[gid];
-  if (!comm) continue;
-  const v = comm.voters[userId];
-  if (!v) continue;
-
-  if (v.processed === true) {
-    alreadyProcessedSomewhere = true;
-    if (v.approved === true && v.weight > 0) {
-      alreadyApprovedSomewhere = true;
+    try {
+      await bot.api.sendMessage(Number(comm.adminId), infoText, {
+        reply_markup: kb,
+      });
+      notifiedAnyAdmin = true;
+    } catch (e) {
+      console.error("Failed to DM admin", comm.adminId, e);
     }
   }
-}
+
+  // ---------------------------------------
+  // 4) mesma parte que você já tinha no final
+  // ---------------------------------------
+  let alreadyProcessedSomewhere = false;
+  let alreadyApprovedSomewhere = false;
+
+  for (const gid of communityIds) {
+    const comm = communities[gid];
+    if (!comm) continue;
+    const v = comm.voters[userId];
+    if (!v) continue;
+
+    if (v.processed === true) {
+      alreadyProcessedSomewhere = true;
+      if (v.approved === true && v.weight > 0) {
+        alreadyApprovedSomewhere = true;
+      }
+    }
+  }
 
   if (notifiedAnyAdmin) {
-    // avisamos pelo menos um admin AGORA
     await ctx.reply(
-        "✅ Your request was sent to the admin.\nYou'll get a DM if you're approved."
+      "✅ Your request was sent to the admin.\nYou'll get a DM if you're approved."
     );
-
-    } else if (alreadyApprovedSomewhere) {
-    // admin já tinha aprovado antes
+  } else if (alreadyApprovedSomewhere) {
     await ctx.reply(
-        "✅ You are already approved to vote in this community.\nUse /myvote to see active proposals."
+      "✅ You are already approved to vote in this community.\nUse /myvote to see active proposals."
     );
-
-    } else if (alreadyProcessedSomewhere) {
-    // admin já viu você e decidiu (provavelmente rejeitou)
+  } else if (alreadyProcessedSomewhere) {
     await ctx.reply(
-        "❌ Your request was already reviewed by the admin.\nIf circumstances changed, ask the admin directly."
+      "❌ Your request was already reviewed by the admin.\nIf circumstances changed, ask the admin directly."
     );
-
-    } else {
-    // não conseguimos nem pingar admin
+  } else {
     await ctx.reply(
-        "⚠️ I couldn't notify the admin (maybe they haven't DM'd me yet).\nAsk the admin to /start me in DM so I can message them."
-    );
-    }
-
-  }
-);
-
-// admin approves preset weight
-bot.callbackQuery(/approve_(-?\d+)_(-?\d+)_(\d+)/, async (ctx) => {
-  const groupId = Number(ctx.match[1]);
-  const targetUserId = Number(ctx.match[2]);
-  const weight = Number(ctx.match[3]);
-
-  const comm = communities[groupId];
-  if (!comm) {
-    await popup(ctx, "Community not found.");
-    return;
-  }
-  if (!isAdmin(comm, ctx.from.id)) {
-    await popup(ctx, "Not authorized.");
-    return;
-  }
-
-  const voter = comm.voters[targetUserId];
-  if (!voter) {
-    await popup(ctx, "User not found here.");
-    return;
-  }
-
-  if (voter.processed === true) {
-    await popup(ctx, "Already processed. Use /setweight to change later.");
-    return;
-  }
-
-  voter.approved = true;
-  voter.weight = weight;
-  voter.processed = true;
-  voter.walletAddress = voter.walletAddress || null;
-  voter.lastChangeReason = "initial approval";
-  voter.lastModifiedAt = new Date().toISOString();
-
-
-  // [DB] persist aprovação
-  await upsertVoter(groupId, targetUserId, voter);
-
-  await ctx.answerCallbackQuery({
-    text: `Approved (${weight} weight)`,
-    show_alert: false,
-  });
-
-  await ctx.reply(
-    `✅ Approved ${voter.username} (ID ${targetUserId}) in "${comm.title}" with weight ${weight}.`
-  );
-
-  try {
-    await bot.api.sendMessage(
-      targetUserId,
-      `🎉 You are approved to vote in "${comm.title}".\n` +
-        `Your voting weight: ${weight}\n` +
-        `Reason: initial approval\n\n` +
-        "When a new vote opens, I'll DM you privately so you can vote.\n" +
-        "You don't need to speak in the group.\n" +
-        "Use /myvote (in DM) to review or change your vote while it's open."
-    );
-  } catch (e) {}
-});
-
-// admin picks custom weight (first-time approval)
-bot.callbackQuery(/custom_(-?\d+)_(-?\d+)/, async (ctx) => {
-  const groupId = Number(ctx.match[1]);
-  const targetUserId = Number(ctx.match[2]);
-
-  const comm = communities[groupId];
-  if (!comm) {
-    await popup(ctx, "Community not found.");
-    return;
-  }
-  if (!isAdmin(comm, ctx.from.id)) {
-    await popup(ctx, "Not authorized.");
-    return;
-  }
-
-  const voter = comm.voters[targetUserId];
-  if (!voter) {
-    await popup(ctx, "User not found.");
-    return;
-  }
-
-  if (voter.processed === true) {
-    await popup(ctx, "Already processed. Use /setweight to change later.");
-    return;
-  }
-
-  pendingCustomWeight[ctx.from.id] = {
-    groupId,
-    targetUserId,
-  };
-
-  await ctx.answerCallbackQuery();
-
-  try {
-    await bot.api.sendMessage(
-      ctx.from.id,
-      `Enter custom voting weight for ${voter.username} (ID ${targetUserId}) in "${comm.title}".\nExample: 5`
-    );
-  } catch (e) {
-    await ctx.reply(
-      `Enter custom voting weight for ${voter.username} (ID ${targetUserId}) in "${comm.title}".\nExample: 5`
+      "⚠️ I couldn't notify the admin (maybe they haven't DM'd me yet).\nAsk the admin to /start me in DM so I can message them."
     );
   }
 });
 
-// admin rejects join
-bot.callbackQuery(/reject_(-?\d+)_(-?\d+)/, async (ctx) => {
-  const groupId = Number(ctx.match[1]);
-  const targetUserId = Number(ctx.match[2]);
-
-  const comm = communities[groupId];
-  if (!comm) {
-    await popup(ctx, "Community not found.");
-    return;
-  }
-  if (!isAdmin(comm, ctx.from.id)) {
-    await popup(ctx, "Not authorized.");
-    return;
-  }
-
-  const voter = comm.voters[targetUserId];
-  if (!voter) {
-    await popup(ctx, "User not found.");
-    return;
-  }
-
-  if (voter.processed === true) {
-    await popup(ctx, "Already processed. Use /setweight to change later.");
-    return;
-  }
-
-  voter.approved = false;
-  voter.weight = null;
-  voter.processed = true;
-  voter.lastChangeReason = "rejected by admin";
-  voter.lastModifiedAt = new Date().toISOString();
-
-  // [DB] persist rejeição
-  await upsertVoter(groupId, targetUserId, voter);
-
-  await ctx.answerCallbackQuery({
-    text: "Rejected",
-    show_alert: false,
-  });
-
-  await ctx.reply(
-    `❌ Rejected ${voter.username} (ID ${targetUserId}) in "${comm.title}".`
-  );
-
-  try {
-    await bot.api.sendMessage(
-      targetUserId,
-      "❌ Your request to vote was not approved.\n" +
-        `Community: "${comm.title}"\n` +
-        "Reason: rejected by admin"
-    );
-  } catch (e) {}
-});
 
 // /new (DM admin only)
 bot.command("new", async (ctx) => {

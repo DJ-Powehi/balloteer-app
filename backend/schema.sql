@@ -59,3 +59,9 @@ CREATE TABLE IF NOT EXISTS proposal_counters (
   group_id BIGINT PRIMARY KEY REFERENCES communities(group_id),
   counter INTEGER NOT NULL DEFAULT 1
 );
+
+ALTER TABLE users_telegram
+ADD COLUMN IF NOT EXISTS wallet_address VARCHAR(120);
+
+ALTER TABLE group_members
+ADD COLUMN IF NOT EXISTS wallet_address VARCHAR(120);
