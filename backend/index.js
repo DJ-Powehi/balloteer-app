@@ -5,6 +5,32 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 const { Bot, InlineKeyboard } = require("grammy");
 
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+app.use(express.json());
+
+// pega do db.js
+const { query } = require("./db");
+
+// endpoint que o bot usa no /join pra saber se o cara já logou no site
+app.get("/api/telegram-user/:tgId", async (req, res) => {
+  const tgId = req.params.tgId;
+  try {
+    const result = await query(
+      "SELECT telegram_id, privy_id, wallet_address FROM users_telegram WHERE telegram_id = $1",
+      [tgId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    return res.json(result.rows[0]);
+  } catch (err) {
+    console.error("error reading users_telegram", err);
+    return res.status(500).json({ error: "db_error" });
+  }
+});
+
 const {
   loadAllCommunities,
   upsertCommunity,
@@ -1610,9 +1636,6 @@ bot.catch((err) => {
 // --------------------------------------------------
 // EXPRESS + WEBHOOK SERVER
 // --------------------------------------------------
-const app = express();
-app.use(cors());
-app.use(bodyParser.json());
 
 // Telegram will POST updates here
 app.post("/telegram/webhook", async (req, res) => {
